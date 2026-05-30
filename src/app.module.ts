@@ -20,16 +20,16 @@ import { DriversModule } from './modules/drivers/drivers.module';
       isGlobal: true,
     }),
 
-   TypeOrmModule.forRoot({
+  TypeOrmModule.forRoot({
   type: 'postgres',
-  host: '127.0.0.1',
-  port: 5433,
-  username: 'postgres',
-  password: 'postgres',
-  database: 'gazexpress_db',
+  host:     process.env.DB_HOST     || '127.0.0.1',
+  port:     parseInt(process.env.DB_PORT || '5432'),
+  username: process.env.DB_USERNAME || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  database: process.env.DB_NAME     || 'gazexpress_db',
   entities: [__dirname + '/**/*.entity{.ts,.js}'],
   synchronize: true,
-  logging: true,
+  logging: false,
 }),
 
     UsersModule,
