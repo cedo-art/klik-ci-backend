@@ -18,15 +18,22 @@ export class AuthService {
     private otpRepository: Repository<OtpCode>,
     private jwtService: JwtService,
   ) {
-    // Initialiser Firebase Admin si pas déjà fait
-    if (!admin.apps.length) {
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId:   process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-        }),
-      });
+    // Firebase Admin — optionnel, uniquement si variables configurées
+    try {
+      if (!admin.apps.length && process.env.FIREBASE_PROJECT_ID) {
+        admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId:   process.env.FIREBASE_PROJECT_ID,
+            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+            privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+          }),
+        });
+        console.log('Firebase Admin initialisé ✅');
+      } else {
+        console.log('Firebase non configuré — mode développement');
+      }
+    } catch (e) {
+      console.log('Firebase init ignoré:', e.message);
     }
   }
 
@@ -62,7 +69,7 @@ export class AuthService {
 
     return {
       message: 'OTP envoyé avec succès',
-      debug_code: process.env.NODE_ENV === 'development' ? code : undefined,
+      debug_code: code,
     };
   }
 
@@ -102,11 +109,13 @@ export class AuthService {
   }
 
   async loginWithFirebase(firebaseToken: string, phone: string) {
-    // Vérifier le token Firebase
+    if (!admin.apps.length) {
+      throw new UnauthorizedException('Firebase non configuré sur ce serveur');
+    }
+
     const decodedToken = await admin.auth().verifyIdToken(firebaseToken);
     if (!decodedToken) throw new UnauthorizedException('Token Firebase invalide');
 
-    // Trouver ou créer l'utilisateur
     let user = await this.usersRepository.findOne({ where: { phone } });
     if (!user) {
       user = this.usersRepository.create({ phone, isVerified: true });
@@ -116,7 +125,6 @@ export class AuthService {
       await this.usersRepository.save(user);
     }
 
-    // Générer les tokens JWT
     const payload = { sub: user.id, phone: user.phone, role: user.role };
     const accessToken  = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, { expiresIn: '30d' });
