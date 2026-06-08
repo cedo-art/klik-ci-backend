@@ -44,15 +44,31 @@ export class DeliveryService {
     return rows[0];
   }
 
- async getDriverZoneStations(userId: string) {
+  async getDriverZoneStations(userId: string) {
   const driver = await this.dataSource.query(
-    `SELECT dr.zone FROM drivers dr WHERE dr."userId" = $1 LIMIT 1`,
+    `SELECT zone, "depotIds" FROM drivers WHERE "userId" = $1 LIMIT 1`,
     [userId]
   );
   if (!driver.length) return [];
-  const zone = driver[0].zone;
-  if (!zone) return [];
+  const { zone, depotIds } = driver[0];
 
+  // Si le livreur a des stations assignées explicitement, on les retourne
+  if (depotIds && depotIds.length > 0) {
+    return this.dataSource.query(`
+      SELECT
+        d.id, d.name, d.address, d.latitude, d.longitude,
+        d."logoUrl", d."isActive", d.commune,
+        COALESCE(SUM(s.quantity), 0)::int AS stock
+      FROM depots d
+      LEFT JOIN stocks s ON s.depot_id = d.id
+      WHERE d."isActive" = true AND d.id = ANY($1)
+      GROUP BY d.id
+      ORDER BY d.name
+    `, [depotIds]);
+  }
+
+  // Fallback : toutes les stations de la zone
+  if (!zone) return [];
   return this.dataSource.query(`
     SELECT
       d.id, d.name, d.address, d.latitude, d.longitude,

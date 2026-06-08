@@ -6,11 +6,23 @@ import { DataSource } from 'typeorm';
 export class DriversService {
   constructor(@InjectDataSource() private dataSource: DataSource) {}
 
+  // Créer la colonne depotIds si elle n'existe pas
+  async onModuleInit() {
+    try {
+      await this.dataSource.query(`
+        ALTER TABLE drivers ADD COLUMN IF NOT EXISTS "depotIds" text[] DEFAULT '{}';
+      `);
+    } catch (e) {
+      console.log('depotIds column already exists or error:', e.message);
+    }
+  }
+
   async getAll() {
     return this.dataSource.query(`
       SELECT
         dr.id, dr."fullName", dr.phone, dr."licenseNumber",
         dr.zone, dr."photoUrl", dr."isActive", dr."userId",
+        dr."depotIds",
         d.name  AS "stationNom", d.id AS "stationId",
         t."plateNumber" AS "tricyclePlate", t.id AS "tricycleId"
       FROM drivers dr
@@ -21,9 +33,12 @@ export class DriversService {
   }
 
   async create(body: any) {
-    const { fullName, phone, licenseNumber, zone, stationId, photoUrl } = body;
+    const { fullName, phone, licenseNumber, zone, stationId, stationIds, photoUrl } = body;
 
-    // Créer ou récupérer le user lié
+    // stationIds = tableau de stations, stationId = station principale (première du tableau)
+    const depotIds = stationIds && stationIds.length > 0 ? stationIds : (stationId ? [stationId] : []);
+    const depotId  = depotIds[0] || null;
+
     const existingUser = await this.dataSource.query(
       `SELECT id FROM users WHERE phone = $1 LIMIT 1`, [phone]
     );
@@ -46,21 +61,24 @@ export class DriversService {
     const result = await this.dataSource.query(`
       INSERT INTO drivers (
         id, "fullName", phone, "licenseNumber", zone,
-        "depotId", "photoUrl", "isActive", "userId", "createdAt", "updatedAt"
+        "depotId", "depotIds", "photoUrl", "isActive", "userId", "createdAt", "updatedAt"
       )
       VALUES (
         uuid_generate_v4(), $1, $2, $3, $4,
-        $5, $6, true, $7, now(), now()
+        $5, $6, $7, true, $8, now(), now()
       )
       RETURNING *
     `, [fullName, phone, licenseNumber || null, zone || null,
-        stationId || null, photoUrl || null, userId]);
+        depotId, depotIds, photoUrl || null, userId]);
 
     return result[0];
   }
 
   async update(id: string, body: any) {
-    const { fullName, phone, licenseNumber, zone, stationId, photoUrl, isActive } = body;
+    const { fullName, phone, licenseNumber, zone, stationId, stationIds, photoUrl, isActive } = body;
+
+    const depotIds = stationIds && stationIds.length > 0 ? stationIds : (stationId ? [stationId] : []);
+    const depotId  = depotIds[0] || null;
 
     await this.dataSource.query(`
       UPDATE drivers SET
@@ -69,12 +87,13 @@ export class DriversService {
         "licenseNumber" = COALESCE($3, "licenseNumber"),
         zone            = COALESCE($4, zone),
         "depotId"       = $5,
-        "photoUrl"      = COALESCE($6, "photoUrl"),
-        "isActive"      = COALESCE($7, "isActive"),
+        "depotIds"      = $6,
+        "photoUrl"      = COALESCE($7, "photoUrl"),
+        "isActive"      = COALESCE($8, "isActive"),
         "updatedAt"     = now()
-      WHERE id = $8
+      WHERE id = $9
     `, [fullName, phone, licenseNumber || null, zone || null,
-        stationId || null, photoUrl || null, isActive, id]);
+        depotId, depotIds, photoUrl || null, isActive, id]);
 
     return { success: true };
   }
@@ -86,7 +105,7 @@ export class DriversService {
     return { success: true };
   }
 
-  // ── Tricycles ─────────────────────────────────────────────────────────────
+  // ── Tricycles ──────────────────────────────────────────────────────────────
   async getTricycles() {
     return this.dataSource.query(`
       SELECT
