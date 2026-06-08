@@ -18,6 +18,11 @@ export class AuthController {
     return this.authService.verifyOtp(verifyOtpDto);
   }
 
+  @Post('firebase')
+  firebaseAuth(@Body() body: { firebaseToken: string; phone: string }) {
+    return this.authService.loginWithFirebase(body.firebaseToken, body.phone);
+  }
+
   @Get('me')
   @UseGuards(JwtAuthGuard)
   getMe(@Request() req) {

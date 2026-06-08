@@ -24,7 +24,6 @@ export class DeliveryService {
     private smsProvider: SmsProvider,
   ) {}
 
-  // ── Profil métier du livreur connecté ────────────────────────────────────
   async getDriverProfile(userId: string) {
     const rows = await this.dataSource.query(`
       SELECT
@@ -45,26 +44,29 @@ export class DeliveryService {
     return rows[0];
   }
 
-  // ── Stations de la zone du livreur ───────────────────────────────────────
-  async getDriverZoneStations(userId: string) {
-    const driver = await this.dataSource.query(
-      `SELECT zone FROM drivers WHERE "userId" = $1 LIMIT 1`, [userId]
-    );
-    if (!driver.length) return [];
-    const zone = driver[0].zone;
-    return this.dataSource.query(`
-      SELECT
-        d.id, d.name, d.address, d.latitude, d.longitude,
-        d."logoUrl", d."isActive",
-        COALESCE(SUM(s.quantity), 0)::int AS stock
-      FROM depots d
-      LEFT JOIN stocks s ON s.depot_id = d.id
-      WHERE d."isActive" = true AND (d.commune = $1 OR $1 IS NULL)
-      GROUP BY d.id ORDER BY d.name
-    `, [zone]);
-  }
+ async getDriverZoneStations(userId: string) {
+  const driver = await this.dataSource.query(
+    `SELECT dr.zone FROM drivers dr WHERE dr."userId" = $1 LIMIT 1`,
+    [userId]
+  );
+  if (!driver.length) return [];
+  const zone = driver[0].zone;
+  if (!zone) return [];
 
-  // ── Livraison d'une commande — enrichie avec infos drivers ────────────────
+  return this.dataSource.query(`
+    SELECT
+      d.id, d.name, d.address, d.latitude, d.longitude,
+      d."logoUrl", d."isActive", d.commune,
+      COALESCE(SUM(s.quantity), 0)::int AS stock
+    FROM depots d
+    LEFT JOIN stocks s ON s.depot_id = d.id
+    WHERE d."isActive" = true
+      AND LOWER(TRIM(d.commune)) = LOWER(TRIM($1))
+    GROUP BY d.id
+    ORDER BY d.name
+  `, [zone]);
+}
+
   async getDeliveryByOrder(orderId: string) {
     const delivery = await this.deliveriesRepository.findOne({
       where: { order: { id: orderId } },
@@ -72,7 +74,6 @@ export class DeliveryService {
     });
     if (!delivery) throw new NotFoundException('Livraison non trouvée');
 
-    // Enrichir avec les infos métier depuis drivers
     const driverInfo = await this.dataSource.query(`
       SELECT dr."fullName", dr.phone, dr.zone,
              t."plateNumber" AS "tricyclePlate"
@@ -93,7 +94,6 @@ export class DeliveryService {
     };
   }
 
-  // ── Mes livraisons (livreur connecté) ────────────────────────────────────
   async getMyDeliveries(userId: string) {
     return this.deliveriesRepository.find({
       where: { driver: { id: userId } },
@@ -105,7 +105,6 @@ export class DeliveryService {
     });
   }
 
-  // ── Assigner manuellement un livreur ─────────────────────────────────────
   async assignDriver(orderId: string, dto: AssignDriverDto) {
     const order = await this.ordersRepository.findOne({
       where: { id: orderId }, relations: ['client'],
@@ -117,7 +116,7 @@ export class DeliveryService {
     const driver = await this.usersRepository.findOne({ where: { id: dto.driverId } });
     if (!driver) throw new NotFoundException('Livreur non trouvé');
 
-    const delivery = new Delivery();
+    const delivery      = new Delivery();
     delivery.order      = order;
     delivery.driver     = driver;
     delivery.status     = DeliveryStatus.ASSIGNED;
@@ -130,14 +129,14 @@ export class DeliveryService {
     if (order.client?.phone) {
       await this.smsProvider.sendSms(
         order.client.phone,
-        `Klik CI - Votre commande est confirmée ! Un tricycle Klik vous sera livré bientôt.`
+        `Klik CI - Votre commande est confirmée ! Votre bouteille vous sera livrée bientôt.`
       ).catch(() => {});
     }
+
     this.deliveryGateway.emitDeliveryStatusUpdate(orderId, DeliveryStatus.ASSIGNED);
     return saved;
   }
 
-  // ── Mise à jour position GPS ──────────────────────────────────────────────
   async updateLocation(deliveryId: string, dto: UpdateLocationDto) {
     const delivery = await this.deliveriesRepository.findOne({
       where: { id: deliveryId }, relations: ['order', 'order.client'],
@@ -162,7 +161,6 @@ export class DeliveryService {
     return saved;
   }
 
-  // ── Mise à jour statut livraison ──────────────────────────────────────────
   async updateStatus(deliveryId: string, dto: UpdateDeliveryStatusDto) {
     const delivery = await this.deliveriesRepository.findOne({
       where: { id: deliveryId },
@@ -173,13 +171,15 @@ export class DeliveryService {
     delivery.status = dto.status;
 
     if (dto.status === DeliveryStatus.DELIVERED) {
-      delivery.deliveredAt    = new Date();
-      delivery.order.status   = OrderStatus.DELIVERED;
+      delivery.deliveredAt  = new Date();
+      delivery.order.status = OrderStatus.DELIVERED;
       await this.ordersRepository.save(delivery.order);
+
       if (delivery.order.client?.phone) {
         const produit = delivery.order.items?.[0]?.product?.name || 'Bouteille de gaz';
-        await this.smsProvider.sendDeliveryConfirmation(
-          delivery.order.client.phone, produit,
+        await this.smsProvider.sendSms(
+          delivery.order.client.phone,
+          `Klik CI - Votre bouteille ${produit} a été livrée avec succès ! Merci de votre confiance 🙏`
         ).catch(() => {});
       }
     }
@@ -187,10 +187,11 @@ export class DeliveryService {
     if (dto.status === DeliveryStatus.EN_ROUTE_CLIENT) {
       delivery.order.status = OrderStatus.PICKED_UP;
       await this.ordersRepository.save(delivery.order);
+
       if (delivery.order.client?.phone) {
         await this.smsProvider.sendSms(
           delivery.order.client.phone,
-          `Klik CI - Votre tricycle Klik est en route ! Arrivée estimée : ${delivery.etaMinutes || 30} min.`
+          `Klik CI - Votre livreur Klik est en route ! Arrivée estimée : ${delivery.etaMinutes || 30} min.`
         ).catch(() => {});
       }
     }
@@ -205,7 +206,6 @@ export class DeliveryService {
     return saved;
   }
 
-  // ── Auto-assignation ──────────────────────────────────────────────────────
   async autoAssignDriver(orderId: string) {
     const order = await this.ordersRepository.findOne({
       where: { id: orderId }, relations: ['depot'],
