@@ -83,24 +83,24 @@ export class OrdersService {
     totalFcfa += deliveryFeeFcfa;
 
     const order = new Order();
-    order.client    = { id: userId } as any;
-    order.depot     = depot;
+    order.client          = { id: userId } as any;
+    order.depot           = depot;
     if (address) order.deliveryAddress = address;
-    order.type           = dto.type;
-    order.totalFcfa      = totalFcfa;
+    order.type            = dto.type;
+    order.totalFcfa       = totalFcfa;
     order.deliveryFeeFcfa = deliveryFeeFcfa;
-    order.status         = OrderStatus.CONFIRMED;
+    order.status          = OrderStatus.CONFIRMED;
     if (dto.scheduledAt) order.scheduledAt = new Date(dto.scheduledAt);
 
     const savedOrder = await this.ordersRepository.save(order);
 
     for (const item of orderItems) {
-      const orderItem       = new OrderItem();
-      orderItem.order       = savedOrder;
-      orderItem.product     = item.product;
-      orderItem.quantity    = item.quantity;
+      const orderItem         = new OrderItem();
+      orderItem.order         = savedOrder;
+      orderItem.product       = item.product;
+      orderItem.quantity      = item.quantity;
       orderItem.unitPriceFcfa = item.unitPriceFcfa;
-      orderItem.returnEmpty = item.returnEmpty;
+      orderItem.returnEmpty   = item.returnEmpty;
       await this.orderItemsRepository.save(orderItem);
 
       const stock = await this.stocksRepository.findOne({
@@ -112,7 +112,7 @@ export class OrdersService {
       }
     }
 
-    // ── Auto-assignation via table drivers ───────────────────────────────
+    // ── Auto-assignation par rayon ────────────────────────────────────────
     await this.autoAssignDriver(savedOrder, depot.id);
 
     return this.ordersRepository.findOne({
@@ -121,51 +121,108 @@ export class OrdersService {
     });
   }
 
-  // ── Cherche un livreur actif assigné au dépôt de la commande ────────────
+  // ── Calcul distance Haversine en km ──────────────────────────────────────
+  private calculerDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) *
+      Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  // ── Auto-assignation : rayon station → livreur de la station ─────────────
   private async autoAssignDriver(order: Order, depotId: string) {
     try {
-      // 1. Chercher un livreur dans drivers dont le depotId correspond
+      // 1. Coordonnées et rayon du dépôt
+      const depots = await this.dataSource.query(`
+        SELECT latitude, longitude, "deliveryRadiusKm"
+        FROM depots WHERE id = $1
+      `, [depotId]);
+      if (!depots.length) return;
+
+      const depotLat = parseFloat(depots[0].latitude);
+      const depotLng = parseFloat(depots[0].longitude);
+      const rayonKm  = parseFloat(depots[0].deliveryRadiusKm) || 5;
+
+      // 2. Vérifier que l'adresse client est dans le rayon
+      if (
+        order.deliveryAddress?.latitude != null &&
+        order.deliveryAddress?.longitude != null
+      ) {
+        const clientLat = parseFloat(String(order.deliveryAddress.latitude));
+        const clientLng = parseFloat(String(order.deliveryAddress.longitude));
+
+        if (!isNaN(clientLat) && !isNaN(clientLng)) {
+          const distance = this.calculerDistance(depotLat, depotLng, clientLat, clientLng);
+          if (distance > rayonKm) {
+            console.log(
+              `Commande ${order.id} hors rayon : ${distance.toFixed(1)}km > ${rayonKm}km`
+            );
+            return;
+          }
+        }
+      }
+      // Si deliveryAddress est null ou sans coordonnées, on assigne quand même
+      // (le client n'a pas encore confirmé l'adresse — on laisse le livreur gérer)
+
+      // 3. Livreur actif assigné à ce dépôt exact (ordre aléatoire pour équilibrer)
       const drivers = await this.dataSource.query(`
         SELECT dr."userId"
         FROM drivers dr
         WHERE dr."depotId" = $1
           AND dr."isActive" = true
+        ORDER BY RANDOM()
         LIMIT 1
       `, [depotId]);
 
-      // 2. Si pas trouvé par dépôt exact, chercher dans la même commune
       let driverUserId: string | null = null;
 
       if (drivers.length > 0) {
         driverUserId = drivers[0].userId;
       } else {
-        // Fallback : chercher n'importe quel livreur actif
-        const anyDriver = await this.dataSource.query(`
-          SELECT "userId" FROM drivers
-          WHERE "isActive" = true
+        // 4. Fallback : livreur actif dans la même commune
+        const fallback = await this.dataSource.query(`
+          SELECT dr."userId"
+          FROM drivers dr
+          JOIN depots d ON d.id = dr."depotId"
+          WHERE dr."isActive" = true
+            AND LOWER(TRIM(d.commune)) = LOWER(TRIM(
+              (SELECT commune FROM depots WHERE id = $1)
+            ))
+          ORDER BY RANDOM()
           LIMIT 1
-        `);
-        if (anyDriver.length > 0) driverUserId = anyDriver[0].userId;
+        `, [depotId]);
+
+        if (fallback.length > 0) driverUserId = fallback[0].userId;
       }
 
-      if (!driverUserId) return; // Aucun livreur disponible
+      if (!driverUserId) {
+        console.log(`Aucun livreur disponible pour le dépôt ${depotId}`);
+        return;
+      }
 
       const driverUser = await this.usersRepository.findOne({
         where: { id: driverUserId },
       });
       if (!driverUser) return;
 
-      const delivery         = new Delivery();
-      delivery.order         = order;
-      delivery.driver        = driverUser;
-      delivery.status        = DeliveryStatus.ASSIGNED;
-      delivery.assignedAt    = new Date();
-      delivery.etaMinutes    = 30;
+      // 5. Créer la livraison
+      const delivery      = new Delivery();
+      delivery.order      = order;
+      delivery.driver     = driverUser;
+      delivery.status     = DeliveryStatus.ASSIGNED;
+      delivery.assignedAt = new Date();
+      delivery.etaMinutes = 30;
       await this.deliveriesRepository.save(delivery);
 
       order.status = OrderStatus.PREPARING;
       await this.ordersRepository.save(order);
 
+      console.log(`✅ Commande ${order.id} assignée au livreur ${driverUserId}`);
     } catch (err) {
       console.log('Auto-assign error:', err);
     }
