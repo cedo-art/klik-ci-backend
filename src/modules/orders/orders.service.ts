@@ -189,20 +189,20 @@ export class OrdersService {
       // Priorité 1 : depotId dans depotIds[]
       // Priorité 2 : depotId principal
       // Fallback   : même commune
-      const drivers = await this.dataSource.query(`
-        SELECT DISTINCT dr."userId"
-        FROM drivers dr
-        WHERE dr."isActive" = true
-          AND (
-            $1 = ANY(COALESCE(dr."depotIds", ARRAY[]::text[]))
-            OR dr."depotId" = $1
-            OR (
-              dr."depotId" IS NULL
-              AND (dr."depotIds" IS NULL OR array_length(dr."depotIds", 1) IS NULL)
-              AND dr.zone = (SELECT commune FROM depots WHERE id = $1 LIMIT 1)
-            )
-          )
-      `, [depot.id]);
+     const drivers = await this.dataSource.query(`
+  SELECT DISTINCT dr."userId"
+  FROM drivers dr
+  WHERE dr."isActive" = true
+    AND (
+      $1::text = ANY(COALESCE(dr."depotIds", ARRAY[]::text[]))
+      OR dr."depotId"::text = $1::text
+      OR (
+        dr."depotId" IS NULL
+        AND (dr."depotIds" IS NULL OR array_length(dr."depotIds", 1) IS NULL)
+        AND dr.zone = (SELECT commune FROM depots WHERE id = $1 LIMIT 1)
+      )
+    )
+`, [depot.id]);
 
       if (!drivers.length) {
         console.log(`⚠️ Aucun livreur pour ${depot.name}`);
