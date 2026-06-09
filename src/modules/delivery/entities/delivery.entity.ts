@@ -1,26 +1,34 @@
 import {
   Entity, PrimaryGeneratedColumn, Column,
   CreateDateColumn, UpdateDateColumn,
-  ManyToOne, OneToOne, JoinColumn
+  ManyToOne, JoinColumn
 } from 'typeorm';
 import { Order } from '../../orders/entities/order.entity';
 import { User } from '../../users/entities/user.entity';
 
 export enum DeliveryStatus {
-  ASSIGNED = 'assigned',
-  EN_ROUTE_DEPOT = 'en_route_depot',
-  PICKED_UP = 'picked_up',
+  ASSIGNED        = 'assigned',
+  EN_ROUTE_DEPOT  = 'en_route_depot',
+  PICKED_UP       = 'picked_up',
   EN_ROUTE_CLIENT = 'en_route_client',
-  DELIVERED = 'delivered',
-  FAILED = 'failed',
+  DELIVERED       = 'delivered',
+  FAILED          = 'failed',
+  CANCELLED       = 'cancelled',
 }
 
+// ── DELIVERY ENTITY ───────────────────────────────────────────────────────────
+// Une commande peut avoir PLUSIEURS livraisons (broadcast à plusieurs livreurs).
+// Relation ManyToOne vers Order (au lieu de OneToOne) pour permettre le broadcast.
+// Quand un livreur accepte, les autres livraisons de la même commande passent
+// en "cancelled" via delivery.service.ts → updateStatus → EN_ROUTE_DEPOT.
+// ─────────────────────────────────────────────────────────────────────────────
 @Entity('deliveries')
 export class Delivery {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @OneToOne(() => Order)
+  // ManyToOne : plusieurs livraisons peuvent pointer vers la même commande
+  @ManyToOne(() => Order)
   @JoinColumn({ name: 'order_id' })
   order: Order;
 
