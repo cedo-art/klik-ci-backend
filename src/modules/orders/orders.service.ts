@@ -22,65 +22,40 @@ interface OrderItemTemp {
 @Injectable()
 export class OrdersService {
   constructor(
-    @InjectRepository(Order)
-    private ordersRepository: Repository<Order>,
-    @InjectRepository(OrderItem)
-    private orderItemsRepository: Repository<OrderItem>,
-    @InjectRepository(Product)
-    private productsRepository: Repository<Product>,
-    @InjectRepository(Depot)
-    private depotsRepository: Repository<Depot>,
-    @InjectRepository(Stock)
-    private stocksRepository: Repository<Stock>,
-    @InjectRepository(Address)
-    private addressesRepository: Repository<Address>,
-    @InjectRepository(Delivery)
-    private deliveriesRepository: Repository<Delivery>,
-    @InjectRepository(User)
-    private usersRepository: Repository<User>,
-    @InjectDataSource() private dataSource: DataSource,
+    @InjectRepository(Order)     private ordersRepository: Repository<Order>,
+    @InjectRepository(OrderItem) private orderItemsRepository: Repository<OrderItem>,
+    @InjectRepository(Product)   private productsRepository: Repository<Product>,
+    @InjectRepository(Depot)     private depotsRepository: Repository<Depot>,
+    @InjectRepository(Stock)     private stocksRepository: Repository<Stock>,
+    @InjectRepository(Address)   private addressesRepository: Repository<Address>,
+    @InjectRepository(Delivery)  private deliveriesRepository: Repository<Delivery>,
+    @InjectRepository(User)      private usersRepository: Repository<User>,
+    @InjectDataSource()          private dataSource: DataSource,
   ) {}
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // CRÉER UNE COMMANDE
-  // Flux : validation → création → décrément stock → broadcast livreurs
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── CRÉER UNE COMMANDE ────────────────────────────────────────────────────
+  // Validation stock → création → décrément stock → broadcast livreurs
   async createOrder(userId: string, dto: CreateOrderDto) {
-    const depot = await this.depotsRepository.findOne({
-      where: { id: dto.depotId, isActive: true },
-    });
+    const depot = await this.depotsRepository.findOne({ where: { id: dto.depotId, isActive: true } });
     if (!depot) throw new NotFoundException('Dépôt non trouvé ou inactif');
 
     let address: Address | null = null;
     if (dto.deliveryAddressId) {
-      address = await this.addressesRepository.findOne({
-        where: { id: dto.deliveryAddressId },
-      });
+      address = await this.addressesRepository.findOne({ where: { id: dto.deliveryAddressId } });
     }
 
     let totalFcfa = 0;
     const orderItems: OrderItemTemp[] = [];
 
     for (const item of dto.items) {
-      const product = await this.productsRepository.findOne({
-        where: { id: item.productId, isActive: true },
-      });
+      const product = await this.productsRepository.findOne({ where: { id: item.productId, isActive: true } });
       if (!product) throw new NotFoundException(`Produit ${item.productId} non trouvé`);
 
-      const stock = await this.stocksRepository.findOne({
-        where: { depot: { id: dto.depotId }, product: { id: item.productId } },
-      });
-      if (!stock || stock.quantity < item.quantity) {
-        throw new BadRequestException(`Stock insuffisant pour ${product.name}`);
-      }
+      const stock = await this.stocksRepository.findOne({ where: { depot: { id: dto.depotId }, product: { id: item.productId } } });
+      if (!stock || stock.quantity < item.quantity) throw new BadRequestException(`Stock insuffisant pour ${product.name}`);
 
       totalFcfa += product.priceFcfa * item.quantity;
-      orderItems.push({
-        product,
-        quantity: item.quantity,
-        unitPriceFcfa: product.priceFcfa,
-        returnEmpty: item.returnEmpty || false,
-      });
+      orderItems.push({ product, quantity: item.quantity, unitPriceFcfa: product.priceFcfa, returnEmpty: item.returnEmpty || false });
     }
 
     const deliveryFeeFcfa = 500;
@@ -107,75 +82,43 @@ export class OrdersService {
       orderItem.returnEmpty   = item.returnEmpty;
       await this.orderItemsRepository.save(orderItem);
 
-      const stock = await this.stocksRepository.findOne({
-        where: { depot: { id: dto.depotId }, product: { id: item.product.id } },
-      });
-      if (stock) {
-        stock.quantity -= item.quantity;
-        await this.stocksRepository.save(stock);
-      }
+      const stock = await this.stocksRepository.findOne({ where: { depot: { id: dto.depotId }, product: { id: item.product.id } } });
+      if (stock) { stock.quantity -= item.quantity; await this.stocksRepository.save(stock); }
     }
 
     // Broadcast automatique aux livreurs de la zone
     await this.broadcastToDrivers(savedOrder, depot);
 
-    return this.ordersRepository.findOne({
-      where: { id: savedOrder.id },
-      relations: ['depot', 'deliveryAddress', 'items', 'items.product'],
-    });
+    return this.ordersRepository.findOne({ where: { id: savedOrder.id }, relations: ['depot', 'deliveryAddress', 'items', 'items.product'] });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // BROADCASTER UNE COMMANDE EXISTANTE (bouton "Préparer" du back-office)
-  // Permet de déclencher le broadcast pour les commandes créées avant le nouveau code
-  // ou pour les commandes qui n'ont pas encore de livreur assigné
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── BROADCASTER UNE COMMANDE EXISTANTE (bouton Préparer du back-office) ───
   async broadcastExistingOrder(orderId: string) {
-    const order = await this.ordersRepository.findOne({
-      where: { id: orderId },
-      relations: ['depot', 'deliveryAddress'],
-    });
+    const order = await this.ordersRepository.findOne({ where: { id: orderId }, relations: ['depot', 'deliveryAddress'] });
     if (!order) throw new NotFoundException('Commande non trouvée');
     if (!order.depot) throw new BadRequestException('Aucun dépôt associé à cette commande');
 
-    // Vérifier qu'il n'y a pas déjà des livraisons actives pour cette commande
-    const existingDeliveries = await this.deliveriesRepository.find({
-      where: { order: { id: orderId } },
-    });
-    const hasActive = existingDeliveries.some(d =>
-      ['assigned', 'en_route_depot', 'picked_up', 'en_route_client'].includes(d.status)
-    );
-    if (hasActive) {
-      return { message: 'Des livraisons actives existent déjà pour cette commande' };
-    }
+    const existingDeliveries = await this.deliveriesRepository.find({ where: { order: { id: orderId } } });
+    const hasActive = existingDeliveries.some(d => ['assigned', 'en_route_depot', 'picked_up', 'en_route_client'].includes(d.status));
+    if (hasActive) return { message: 'Des livraisons actives existent déjà pour cette commande' };
 
-    // Broadcaster aux livreurs
     await this.broadcastToDrivers(order, order.depot);
     return { message: `Commande broadcastée aux livreurs de la zone ${order.depot.commune || order.depot.name}` };
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // BROADCAST AUX LIVREURS DE LA ZONE
-  //
-  // 1. Vérifie que l'adresse client est dans le rayon du dépôt (5km)
-  // 2. Trouve TOUS les livreurs actifs couvrant ce dépôt
-  // 3. Crée une livraison "assigned" pour chacun
-  // 4. Quand l'un accepte (en_route_depot), delivery.service.ts annule les autres
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── BROADCAST INTERNE ─────────────────────────────────────────────────────
+  // Trouve tous les livreurs couvrant le dépôt et crée une livraison pour chacun.
+  // Quand l'un accepte (en_route_depot), delivery.service.ts annule les autres.
   private async broadcastToDrivers(order: Order, depot: Depot) {
     try {
       const depotLat = parseFloat(String(depot.latitude));
       const depotLng = parseFloat(String(depot.longitude));
-      const rayonKm  = depot.deliveryRadiusKm || 5;
+      const rayonKm  = depot.deliveryRadiusKm || 10;
 
-      // Vérification rayon si l'adresse a des coordonnées
-      if (
-        order.deliveryAddress?.latitude != null &&
-        order.deliveryAddress?.longitude != null
-      ) {
+      // Vérifier rayon si coordonnées disponibles
+      if (order.deliveryAddress?.latitude != null && order.deliveryAddress?.longitude != null) {
         const clientLat = parseFloat(String(order.deliveryAddress.latitude));
         const clientLng = parseFloat(String(order.deliveryAddress.longitude));
-
         if (!isNaN(clientLat) && !isNaN(clientLng)) {
           const distance = this.calculerDistance(depotLat, depotLng, clientLat, clientLng);
           if (distance > rayonKm) {
@@ -185,36 +128,28 @@ export class OrdersService {
         }
       }
 
-      // Trouver tous les livreurs actifs couvrant ce dépôt
-      // Priorité 1 : depotId dans depotIds[]
-      // Priorité 2 : depotId principal
-      // Fallback   : même commune
-    const drivers = await this.dataSource.query(`
-  SELECT DISTINCT dr."userId"
-  FROM drivers dr
-  WHERE dr."isActive" = true
-    AND (
-      $1::text = ANY(COALESCE(dr."depotIds", ARRAY[]::text[]))
-      OR dr."depotId" = $1::uuid
-      OR (
-        dr."depotId" IS NULL
-        AND (dr."depotIds" IS NULL OR array_length(dr."depotIds", 1) IS NULL)
-        AND dr.zone = (SELECT commune FROM depots WHERE id = $1::uuid LIMIT 1)
-      )
-    )
-`, [depot.id]);
+      // Trouver livreurs : depotIds[] > depotId > commune
+      const drivers = await this.dataSource.query(`
+        SELECT DISTINCT dr."userId"
+        FROM drivers dr
+        WHERE dr."isActive" = true
+          AND (
+            $1::text = ANY(COALESCE(dr."depotIds", ARRAY[]::text[]))
+            OR dr."depotId" = $1::uuid
+            OR (
+              dr."depotId" IS NULL
+              AND (dr."depotIds" IS NULL OR array_length(dr."depotIds", 1) IS NULL)
+              AND dr.zone = (SELECT commune FROM depots WHERE id = $1::uuid LIMIT 1)
+            )
+          )
+      `, [depot.id]);
 
-      if (!drivers.length) {
-        console.log(`⚠️ Aucun livreur pour ${depot.name}`);
-        return;
-      }
+      if (!drivers.length) { console.log(`⚠️ Aucun livreur pour ${depot.name}`); return; }
 
       console.log(`📡 Broadcast commande ${order.id} → ${drivers.length} livreur(s)`);
 
       for (const driverRow of drivers) {
-        const driverUser = await this.usersRepository.findOne({
-          where: { id: driverRow.userId },
-        });
+        const driverUser = await this.usersRepository.findOne({ where: { id: driverRow.userId } });
         if (!driverUser) continue;
 
         const delivery      = new Delivery();
@@ -224,7 +159,6 @@ export class OrdersService {
         delivery.assignedAt = new Date();
         delivery.etaMinutes = 30;
         await this.deliveriesRepository.save(delivery);
-
         console.log(`✅ Assigné au livreur ${driverRow.userId}`);
       }
 
@@ -236,54 +170,32 @@ export class OrdersService {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // UTILITAIRE : Distance Haversine en km
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── DISTANCE HAVERSINE (km) ───────────────────────────────────────────────
   private calculerDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
     const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLng = (lng2 - lng1) * Math.PI / 180;
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(lat1 * Math.PI / 180) *
-      Math.cos(lat2 * Math.PI / 180) *
-      Math.sin(dLng / 2) ** 2;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // ADMIN : toutes les commandes
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── ADMIN : toutes les commandes ──────────────────────────────────────────
   async getAllOrders() {
-    return this.ordersRepository.find({
-      relations: ['client', 'depot', 'deliveryAddress', 'items', 'items.product'],
-      order: { createdAt: 'DESC' },
-    });
+    return this.ordersRepository.find({ relations: ['client', 'depot', 'deliveryAddress', 'items', 'items.product'], order: { createdAt: 'DESC' } });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // CLIENT : ses commandes
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── CLIENT : ses commandes ────────────────────────────────────────────────
   async getMyOrders(userId: string) {
-    return this.ordersRepository.find({
-      where: { client: { id: userId } },
-      relations: ['depot', 'deliveryAddress', 'items', 'items.product'],
-      order: { createdAt: 'DESC' },
-    });
+    return this.ordersRepository.find({ where: { client: { id: userId } }, relations: ['depot', 'deliveryAddress', 'items', 'items.product'], order: { createdAt: 'DESC' } });
   }
 
   async getOrderById(orderId: string, userId: string) {
-    const order = await this.ordersRepository.findOne({
-      where: { id: orderId, client: { id: userId } },
-      relations: ['depot', 'deliveryAddress', 'items', 'items.product'],
-    });
+    const order = await this.ordersRepository.findOne({ where: { id: orderId, client: { id: userId } }, relations: ['depot', 'deliveryAddress', 'items', 'items.product'] });
     if (!order) throw new NotFoundException('Commande non trouvée');
     return order;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // ADMIN : mettre à jour le statut
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── ADMIN : mettre à jour le statut ───────────────────────────────────────
   async updateOrderStatus(orderId: string, dto: UpdateOrderStatusDto) {
     const order = await this.ordersRepository.findOne({ where: { id: orderId } });
     if (!order) throw new NotFoundException('Commande non trouvée');
@@ -291,17 +203,11 @@ export class OrdersService {
     return this.ordersRepository.save(order);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // CLIENT : annuler sa commande (uniquement en attente)
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ── CLIENT : annuler sa commande ──────────────────────────────────────────
   async cancelOrder(orderId: string, userId: string) {
-    const order = await this.ordersRepository.findOne({
-      where: { id: orderId, client: { id: userId } },
-    });
+    const order = await this.ordersRepository.findOne({ where: { id: orderId, client: { id: userId } } });
     if (!order) throw new NotFoundException('Commande non trouvée');
-    if (order.status !== OrderStatus.PENDING) {
-      throw new BadRequestException('Seules les commandes en attente peuvent être annulées');
-    }
+    if (order.status !== OrderStatus.PENDING) throw new BadRequestException('Seules les commandes en attente peuvent être annulées');
     order.status = OrderStatus.CANCELLED;
     return this.ordersRepository.save(order);
   }
