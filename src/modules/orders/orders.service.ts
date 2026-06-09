@@ -41,6 +41,11 @@ export class OrdersService {
     @InjectDataSource() private dataSource: DataSource,
   ) {}
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CRÉER UNE COMMANDE
+  // Flux complet : validation stock → création commande → décrément stock →
+  // broadcast aux livreurs de la zone
+  // ─────────────────────────────────────────────────────────────────────────────
   async createOrder(userId: string, dto: CreateOrderDto) {
     const depot = await this.depotsRepository.findOne({
       where: { id: dto.depotId, isActive: true },
@@ -94,6 +99,7 @@ export class OrdersService {
 
     const savedOrder = await this.ordersRepository.save(order);
 
+    // Sauvegarde des articles et décrément du stock
     for (const item of orderItems) {
       const orderItem         = new OrderItem();
       orderItem.order         = savedOrder;
@@ -112,8 +118,8 @@ export class OrdersService {
       }
     }
 
-    // ── Auto-assignation par rayon ────────────────────────────────────────
-    await this.autoAssignDriver(savedOrder, depot.id);
+    // Broadcast aux livreurs : crée une livraison pour chaque livreur de la zone
+    await this.broadcastToDrivers(savedOrder, depot);
 
     return this.ordersRepository.findOne({
       where: { id: savedOrder.id },
@@ -121,7 +127,94 @@ export class OrdersService {
     });
   }
 
-  // ── Calcul distance Haversine en km ──────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────────
+  // BROADCAST AUX LIVREURS DE LA ZONE
+  //
+  // Logique :
+  // 1. Vérifie que l'adresse client est dans le rayon du dépôt (5km par défaut)
+  // 2. Trouve TOUS les livreurs actifs qui couvrent ce dépôt (depotIds ou commune)
+  // 3. Crée une livraison "assigned" pour CHACUN d'eux
+  // 4. Quand l'un accepte (→ en_route_depot), delivery.service.ts annule les autres
+  // ─────────────────────────────────────────────────────────────────────────────
+  private async broadcastToDrivers(order: Order, depot: Depot) {
+    try {
+      const depotLat = parseFloat(String(depot.latitude));
+      const depotLng = parseFloat(String(depot.longitude));
+      const rayonKm  = depot.deliveryRadiusKm || 5;
+
+      // Vérification du rayon si l'adresse client a des coordonnées
+      if (
+        order.deliveryAddress?.latitude != null &&
+        order.deliveryAddress?.longitude != null
+      ) {
+        const clientLat = parseFloat(String(order.deliveryAddress.latitude));
+        const clientLng = parseFloat(String(order.deliveryAddress.longitude));
+
+        if (!isNaN(clientLat) && !isNaN(clientLng)) {
+          const distance = this.calculerDistance(depotLat, depotLng, clientLat, clientLng);
+          if (distance > rayonKm) {
+            console.log(`⚠️ Commande ${order.id} hors rayon : ${distance.toFixed(1)}km > ${rayonKm}km`);
+            return;
+          }
+        }
+      }
+
+      // Trouver tous les livreurs actifs qui couvrent ce dépôt
+      // Priorité 1 : livreurs avec ce dépôt dans leur depotIds
+      // Priorité 2 : livreurs avec ce dépôt comme depotId principal
+      // Priorité 3 : livreurs de la même commune (fallback)
+      const drivers = await this.dataSource.query(`
+        SELECT DISTINCT dr."userId"
+        FROM drivers dr
+        WHERE dr."isActive" = true
+          AND (
+            $1 = ANY(COALESCE(dr."depotIds", ARRAY[]::text[]))
+            OR dr."depotId" = $1
+            OR (
+              dr."depotId" IS NULL
+              AND (dr."depotIds" IS NULL OR array_length(dr."depotIds", 1) IS NULL)
+              AND dr.zone = (SELECT commune FROM depots WHERE id = $1 LIMIT 1)
+            )
+          )
+      `, [depot.id]);
+
+      if (!drivers.length) {
+        console.log(`⚠️ Aucun livreur pour le dépôt ${depot.id} (${depot.name})`);
+        return;
+      }
+
+      console.log(`📡 Broadcast commande ${order.id} → ${drivers.length} livreur(s)`);
+
+      // Créer une livraison par livreur
+      for (const driverRow of drivers) {
+        const driverUser = await this.usersRepository.findOne({
+          where: { id: driverRow.userId },
+        });
+        if (!driverUser) continue;
+
+        const delivery      = new Delivery();
+        delivery.order      = order;
+        delivery.driver     = driverUser;
+        delivery.status     = DeliveryStatus.ASSIGNED;
+        delivery.assignedAt = new Date();
+        delivery.etaMinutes = 30;
+        await this.deliveriesRepository.save(delivery);
+
+        console.log(`✅ Livraison assignée au livreur ${driverRow.userId}`);
+      }
+
+      // Passer la commande en "preparing"
+      order.status = OrderStatus.PREPARING;
+      await this.ordersRepository.save(order);
+
+    } catch (err) {
+      console.log('❌ Broadcast error:', err);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // UTILITAIRE : Calcul de distance Haversine entre deux points GPS (en km)
+  // ─────────────────────────────────────────────────────────────────────────────
   private calculerDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
     const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -134,101 +227,9 @@ export class OrdersService {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
-  // ── Auto-assignation : rayon station → livreur de la station ─────────────
-  private async autoAssignDriver(order: Order, depotId: string) {
-    try {
-      // 1. Coordonnées et rayon du dépôt
-      const depots = await this.dataSource.query(`
-        SELECT latitude, longitude, "deliveryRadiusKm"
-        FROM depots WHERE id = $1
-      `, [depotId]);
-      if (!depots.length) return;
-
-      const depotLat = parseFloat(depots[0].latitude);
-      const depotLng = parseFloat(depots[0].longitude);
-      const rayonKm  = parseFloat(depots[0].deliveryRadiusKm) || 5;
-
-      // 2. Vérifier que l'adresse client est dans le rayon
-      if (
-        order.deliveryAddress?.latitude != null &&
-        order.deliveryAddress?.longitude != null
-      ) {
-        const clientLat = parseFloat(String(order.deliveryAddress.latitude));
-        const clientLng = parseFloat(String(order.deliveryAddress.longitude));
-
-        if (!isNaN(clientLat) && !isNaN(clientLng)) {
-          const distance = this.calculerDistance(depotLat, depotLng, clientLat, clientLng);
-          if (distance > rayonKm) {
-            console.log(
-              `Commande ${order.id} hors rayon : ${distance.toFixed(1)}km > ${rayonKm}km`
-            );
-            return;
-          }
-        }
-      }
-      // Si deliveryAddress est null ou sans coordonnées, on assigne quand même
-      // (le client n'a pas encore confirmé l'adresse — on laisse le livreur gérer)
-
-      // 3. Livreur actif assigné à ce dépôt exact (ordre aléatoire pour équilibrer)
-      const drivers = await this.dataSource.query(`
-        SELECT dr."userId"
-        FROM drivers dr
-        WHERE dr."depotId" = $1
-          AND dr."isActive" = true
-        ORDER BY RANDOM()
-        LIMIT 1
-      `, [depotId]);
-
-      let driverUserId: string | null = null;
-
-      if (drivers.length > 0) {
-        driverUserId = drivers[0].userId;
-      } else {
-        // 4. Fallback : livreur actif dans la même commune
-        const fallback = await this.dataSource.query(`
-          SELECT dr."userId"
-          FROM drivers dr
-          JOIN depots d ON d.id = dr."depotId"
-          WHERE dr."isActive" = true
-            AND LOWER(TRIM(d.commune)) = LOWER(TRIM(
-              (SELECT commune FROM depots WHERE id = $1)
-            ))
-          ORDER BY RANDOM()
-          LIMIT 1
-        `, [depotId]);
-
-        if (fallback.length > 0) driverUserId = fallback[0].userId;
-      }
-
-      if (!driverUserId) {
-        console.log(`Aucun livreur disponible pour le dépôt ${depotId}`);
-        return;
-      }
-
-      const driverUser = await this.usersRepository.findOne({
-        where: { id: driverUserId },
-      });
-      if (!driverUser) return;
-
-      // 5. Créer la livraison
-      const delivery      = new Delivery();
-      delivery.order      = order;
-      delivery.driver     = driverUser;
-      delivery.status     = DeliveryStatus.ASSIGNED;
-      delivery.assignedAt = new Date();
-      delivery.etaMinutes = 30;
-      await this.deliveriesRepository.save(delivery);
-
-      order.status = OrderStatus.PREPARING;
-      await this.ordersRepository.save(order);
-
-      console.log(`✅ Commande ${order.id} assignée au livreur ${driverUserId}`);
-    } catch (err) {
-      console.log('Auto-assign error:', err);
-    }
-  }
-
-  // ── ADMIN : toutes les commandes ─────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ADMIN : TOUTES LES COMMANDES
+  // ─────────────────────────────────────────────────────────────────────────────
   async getAllOrders() {
     return this.ordersRepository.find({
       relations: ['client', 'depot', 'deliveryAddress', 'items', 'items.product'],
@@ -236,6 +237,9 @@ export class OrdersService {
     });
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CLIENT : SES COMMANDES
+  // ─────────────────────────────────────────────────────────────────────────────
   async getMyOrders(userId: string) {
     return this.ordersRepository.find({
       where: { client: { id: userId } },
@@ -253,6 +257,9 @@ export class OrdersService {
     return order;
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ADMIN : METTRE À JOUR LE STATUT D'UNE COMMANDE
+  // ─────────────────────────────────────────────────────────────────────────────
   async updateOrderStatus(orderId: string, dto: UpdateOrderStatusDto) {
     const order = await this.ordersRepository.findOne({ where: { id: orderId } });
     if (!order) throw new NotFoundException('Commande non trouvée');
@@ -260,6 +267,9 @@ export class OrdersService {
     return this.ordersRepository.save(order);
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CLIENT : ANNULER SA COMMANDE (uniquement si encore en attente)
+  // ─────────────────────────────────────────────────────────────────────────────
   async cancelOrder(orderId: string, userId: string) {
     const order = await this.ordersRepository.findOne({
       where: { id: orderId, client: { id: userId } },
