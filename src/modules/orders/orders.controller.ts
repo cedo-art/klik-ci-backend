@@ -12,19 +12,29 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
+  // Client : créer une commande (broadcast automatique aux livreurs)
   @Post()
   createOrder(@Request() req, @Body() dto: CreateOrderDto) {
     return this.ordersService.createOrder(req.user.id, dto);
   }
 
+  // Admin : toutes les commandes
   @Get('admin/all')
   getAllOrders() {
     return this.ordersService.getAllOrders();
   }
 
+  // Client : ses commandes
   @Get()
   getMyOrders(@Request() req) {
     return this.ordersService.getMyOrders(req.user.id);
+  }
+
+  // Admin : broadcaster une commande existante aux livreurs de sa zone
+  // Appelé depuis le back-office quand on clique "Préparer"
+  @Post(':id/broadcast')
+  broadcastOrder(@Param('id') id: string) {
+    return this.ordersService.broadcastExistingOrder(id);
   }
 
   @Get(':id')
