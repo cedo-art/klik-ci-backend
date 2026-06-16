@@ -1,4 +1,5 @@
 import { IsString, IsNumber, IsOptional, IsBoolean, Min, Max } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateAddressDto {
   @IsString()
@@ -7,13 +8,19 @@ export class CreateAddressDto {
   @IsString()
   fullAddress: string;
 
+  // @Type(() => Number) force la conversion string → number
+  // au cas où l'app React Native envoie "5.3750" au lieu de 5.3750
+  @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   @Min(-90) @Max(90)
-  latitude: number;
+  latitude?: number;
 
+  @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   @Min(-180) @Max(180)
-  longitude: number;
+  longitude?: number;
 
   @IsOptional()
   @IsString()
