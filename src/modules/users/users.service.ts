@@ -64,10 +64,10 @@ export class UsersService {
     // Forcer la conversion en nombre au cas où les valeurs arrivent en string
     const address = this.addressesRepository.create({
       ...dto,
-      latitude:  dto.latitude  != null ? Number(dto.latitude)  : null,
-      longitude: dto.longitude != null ? Number(dto.longitude) : null,
       user: { id: userId } as any,
     });
+    if (dto.latitude  != null) (address as any).latitude  = Number(dto.latitude);
+    if (dto.longitude != null) (address as any).longitude = Number(dto.longitude);
 
     console.log('[createAddress] address à sauvegarder:', JSON.stringify({
       latitude:  address.latitude,
