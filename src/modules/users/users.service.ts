@@ -48,16 +48,32 @@ export class UsersService {
   }
 
   async createAddress(userId: string, dto: CreateAddressDto) {
+    // Log pour déboguer les coordonnées reçues
+    console.log('[createAddress] userId:', userId);
+    console.log('[createAddress] dto reçu:', JSON.stringify(dto));
+    console.log('[createAddress] latitude:', dto.latitude, typeof dto.latitude);
+    console.log('[createAddress] longitude:', dto.longitude, typeof dto.longitude);
+
     if (dto.isDefault) {
       await this.addressesRepository.update(
         { user: { id: userId } },
         { isDefault: false },
       );
     }
+
+    // Forcer la conversion en nombre au cas où les valeurs arrivent en string
     const address = this.addressesRepository.create({
       ...dto,
+      latitude:  dto.latitude  != null ? Number(dto.latitude)  : null,
+      longitude: dto.longitude != null ? Number(dto.longitude) : null,
       user: { id: userId } as any,
     });
+
+    console.log('[createAddress] address à sauvegarder:', JSON.stringify({
+      latitude:  address.latitude,
+      longitude: address.longitude,
+    }));
+
     return this.addressesRepository.save(address);
   }
 
